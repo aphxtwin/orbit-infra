@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  # PostgreSQL database for tenant provisioning data
+  postgres:
+    image: postgres:16-alpine
+    container_name: provisioning-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: provisioning
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Go application (for development)
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: provisioning-app
+    volumes:
+      - .:/app  # Mount source code for hot reload
+      - go_modules:/go/pkg/mod  # Cache Go modules
+    environment:
+      # Database configuration
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: provisioning
+      DB_SSLMODE: disable
+
+      # Connection pool settings
+      DB_MAX_CONNS: 25
+      DB_MIN_CONNS: 5
+      DB_MAX_CONN_LIFETIME_MINUTES: 30
+      DB_MAX_CONN_IDLE_TIME_MINUTES: 5
+
+      # AWS (will configure KMS later)
+      AWS_REGION: us-east-1
+
+      # App settings
+      ENVIRONMENT: development
+      LOG_LEVEL: debug
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"  # Application API port
+    command: go run cmd/controller/main.go
+
+volumes:
+  postgres_data:
+  go_modules:

@@ -1,0 +1,207 @@
+# ============================================
+# Operating System Files
+# ============================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*~
+
+# ============================================
+# IDEs and Editors
+# ============================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*.bak
+*.tmp
+*.code-workspace
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# ============================================
+# Node.js / JavaScript / TypeScript
+# ============================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+.pnpm-store/
+dist/
+dist-ssr/
+build/
+*.local
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.cache/
+.parcel-cache/
+.next/
+out/
+.nuxt/
+.vuepress/dist
+.serverless/
+.fusebox/
+.dynamodb/
+.tern-port
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+.pnp.*
+coverage/
+.nyc_output/
+*.tsbuildinfo
+
+# ============================================
+# Go
+# ============================================
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+provisioning/provisioning
+provisioning/main
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+*.cover
+go.work
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work.sum
+
+# Air live reload
+tmp/
+
+# ============================================
+# Python / Odoo
+# ============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.hypothesis/
+*.egg-info/
+dist/
+build/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+wheels/
+*.egg
+.pytype/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Odoo specific
+odoo/filestore/
+odoo/sessions/
+*.log
+odoo.conf
+odoo-server.conf
+
+# ============================================
+# Certificates & Security
+# ============================================
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.jks
+*.csr
+odoo/certbot/conf/
+odoo/certbot/www/
+odoo/certbot/logs/
+
+# ============================================
+# Docker
+# ============================================
+.dockerignore
+
+# ============================================
+# Terraform / Infrastructure
+# ============================================
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform.lock.hcl
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# ============================================
+# Logs & Databases
+# ============================================
+*.log
+logs/
+*.sql
+*.sqlite
+*.sqlite3
+*.db
+
+# ============================================
+# Backups
+# ============================================
+*.backup
+*.bak
+*.old
+*.orig
+
+# ============================================
+# Temporary Files
+# ============================================
+tmp/
+temp/
+*.tmp
+.cache/
+
+# ============================================
+# Project Specific
+# ============================================
+# Add any project-specific ignores here
