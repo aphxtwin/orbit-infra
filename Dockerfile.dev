@@ -1,20 +1,27 @@
 # Development Dockerfile with hot reload
-FROM golang:1.22-alpine
+FROM golang:1.23-alpine
 
 # Install development tools
 RUN apk add --no-cache git make
 
 # Install Air for hot reload (automatically recompiles on file changes)
-RUN go install github.com/cosmtrek/air@latest
+# Pinning to v1.52.3 which works with Go 1.23 (latest has broken version constraint)
+RUN go install github.com/air-verse/air@v1.52.3
 
 # Install golang-migrate for database migrations
 RUN go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
 
 # Set working directory
-WORKDIR /app
+WORKDIR /controller
 
-# Copy go.mod and go.sum first (for layer caching)
-COPY go.mod go.sum ./
+# Copy go.mod first
+COPY go.mod ./
+
+# Initialize go.sum if it doesn't exist
+RUN go mod download || touch go.sum
+
+# Copy go.sum if it exists
+COPY go.sum* ./
 
 # Download dependencies
 RUN go mod download
