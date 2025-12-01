@@ -1,4 +1,4 @@
-package lambda
+package aws
 
 import "time"
 

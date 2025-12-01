@@ -1,0 +1,238 @@
+package orchestrator
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+
+	"provisioning/internal/api"
+	"provisioning/internal/aws"
+	"provisioning/internal/db"
+	"provisioning/internal/models"
+)
+
+// Orchestrator coordinates tenant provisioning between Lambda and database
+type Orchestrator struct {
+	db           *db.DB
+	lambdaClient *aws.Client
+	functionName string
+}
+
+// Config holds orchestrator configuration
+type Config struct {
+	DB                       *db.DB
+	LambdaClient             *aws.Client
+	ProvisioningFunctionName string
+}
+
+// NewOrchestrator creates a new orchestrator instance
+func NewOrchestrator(cfg Config) *Orchestrator {
+	return &Orchestrator{
+		db:           cfg.DB,
+		lambdaClient: cfg.LambdaClient,
+		functionName: cfg.ProvisioningFunctionName,
+	}
+}
+
+// CreateTenant creates a new tenant and initiates provisioning
+func (o *Orchestrator) CreateTenant(ctx context.Context, req api.CreateTenantRequest) (*api.CreateTenantResponse, error) {
+	// Validate request
+	if err := o.validateCreateRequest(req); err != nil {
+		return nil, fmt.Errorf("validation failed: %w", err)
+	}
+
+	// Generate tenant ID
+	tenantID := uuid.New()
+
+	// Set defaults for infrastructure config
+	dbInstanceClass := req.DatabaseInstanceClass
+	if dbInstanceClass == "" {
+		dbInstanceClass = "db.t3.micro"
+	}
+
+	storageGB := req.StorageGB
+	if storageGB == 0 {
+		storageGB = 20
+	}
+
+	// Build REX URL from subdomain
+	rexURL := fmt.Sprintf("https://%s.rex.example.com", req.Subdomain)
+
+	// Create tenant record in database
+	tenant := &models.Tenant{
+		ID:         tenantID,
+		Name:       req.Name,
+		Subdomain:  req.Subdomain,
+		RexURL:     rexURL,
+		AdminEmail: req.AdminEmail,
+		Status:     models.TenantStatusPending,
+		Region:     req.Region,
+		Config:     []byte("{}"), // Empty JSONB for now
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+	}
+
+	if err := o.createTenantInDB(ctx, tenant); err != nil {
+		return nil, fmt.Errorf("failed to create tenant in database: %w", err)
+	}
+
+	// Update status to provisioning
+	if err := o.updateTenantStatus(ctx, tenantID, models.TenantStatusProvisioning); err != nil {
+		return nil, fmt.Errorf("failed to update tenant status: %w", err)
+	}
+
+	// Prepare Lambda provisioning request
+	lambdaReq := aws.ProvisioningRequest{
+		TenantID:    tenantID.String(),
+		Environment: req.Environment,
+		Config: aws.ProvisioningConfig{
+			Region:                req.Region,
+			DatabaseInstanceClass: dbInstanceClass,
+			StorageGB:             storageGB,
+		},
+		Metadata: map[string]interface{}{
+			"subdomain":   req.Subdomain,
+			"admin_email": req.AdminEmail,
+			"name":        req.Name,
+		},
+	}
+
+	// Invoke Lambda to provision infrastructure
+	// This is synchronous - waits for Lambda to complete
+	lambdaResp, err := o.lambdaClient.ProvisionTenant(ctx, o.functionName, lambdaReq)
+	if err != nil {
+		// Update tenant status to failed
+		_ = o.updateTenantStatus(ctx, tenantID, models.TenantStatusFailed)
+		return nil, fmt.Errorf("Lambda provisioning failed: %w", err)
+	}
+
+	// Handle Lambda response
+	if lambdaResp.Status == aws.StatusCompleted {
+		// Provisioning succeeded - update tenant to active
+		if err := o.updateTenantStatus(ctx, tenantID, models.TenantStatusActive); err != nil {
+			return nil, fmt.Errorf("failed to update tenant to active: %w", err)
+		}
+
+		// Store infrastructure state if resources were provisioned
+		if lambdaResp.Resources != nil {
+			if err := o.storeInfrastructureState(ctx, tenantID, lambdaResp); err != nil {
+				return nil, fmt.Errorf("failed to store infrastructure state: %w", err)
+			}
+		}
+	} else if lambdaResp.Status == aws.StatusFailed {
+		// Provisioning failed - update tenant status
+		_ = o.updateTenantStatus(ctx, tenantID, models.TenantStatusFailed)
+		errMsg := "unknown error"
+		if lambdaResp.Error != nil {
+			errMsg = lambdaResp.Error.Message
+		}
+		return nil, fmt.Errorf("provisioning failed: %s", errMsg)
+	}
+
+	// Return response
+	return &api.CreateTenantResponse{
+		TenantID:            tenantID.String(),
+		Status:              string(lambdaResp.Status),
+		ProvisioningStarted: true,
+		CreatedAt:           tenant.CreatedAt,
+	}, nil
+}
+
+// validateCreateRequest validates the create tenant request
+func (o *Orchestrator) validateCreateRequest(req api.CreateTenantRequest) error {
+	if req.Name == "" {
+		return fmt.Errorf("name is required")
+	}
+	if req.Subdomain == "" {
+		return fmt.Errorf("subdomain is required")
+	}
+	if req.Environment == "" {
+		return fmt.Errorf("environment is required")
+	}
+	if req.Environment != "staging" && req.Environment != "production" {
+		return fmt.Errorf("environment must be 'staging' or 'production'")
+	}
+	if req.Region == "" {
+		return fmt.Errorf("region is required")
+	}
+	return nil
+}
+
+// createTenantInDB inserts a new tenant record
+func (o *Orchestrator) createTenantInDB(ctx context.Context, tenant *models.Tenant) error {
+	query := `
+		INSERT INTO tenants (id, name, subdomain, rex_url, admin_email, status, region, config, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	`
+	_, err := o.db.Pool.Exec(ctx, query,
+		tenant.ID,
+		tenant.Name,
+		tenant.Subdomain,
+		tenant.RexURL,
+		tenant.AdminEmail,
+		tenant.Status,
+		tenant.Region,
+		tenant.Config,
+		tenant.CreatedAt,
+		tenant.UpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to insert tenant: %w", err)
+	}
+	return nil
+}
+
+// updateTenantStatus updates the status of a tenant
+func (o *Orchestrator) updateTenantStatus(ctx context.Context, tenantID uuid.UUID, status string) error {
+	query := `
+		UPDATE tenants
+		SET status = $1, updated_at = $2
+		WHERE id = $3
+	`
+	_, err := o.db.Pool.Exec(ctx, query, status, time.Now(), tenantID)
+	if err != nil {
+		return fmt.Errorf("failed to update tenant status: %w", err)
+	}
+	return nil
+}
+
+// storeInfrastructureState creates or updates infrastructure state
+func (o *Orchestrator) storeInfrastructureState(ctx context.Context, tenantID uuid.UUID, lambdaResp *aws.ProvisioningResponse) error {
+	// Marshal outputs to JSON
+	outputsJSON, err := json.Marshal(lambdaResp.Metadata)
+	if err != nil {
+		outputsJSON = []byte("{}")
+	}
+
+	infraState := &models.InfrastructureState{
+		ID:             uuid.New(),
+		TenantID:       tenantID,
+		RDSEndpoint:    &lambdaResp.Resources.RDSEndpoint,
+		S3BackupBucket: &lambdaResp.Resources.S3Bucket,
+		Outputs:        outputsJSON,
+		CreatedAt:      time.Now(),
+		UpdatedAt:      time.Now(),
+	}
+
+	query := `
+		INSERT INTO infrastructure_state (id, tenant_id, rds_endpoint, s3_backup_bucket, outputs, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	`
+	_, err = o.db.Pool.Exec(ctx, query,
+		infraState.ID,
+		infraState.TenantID,
+		infraState.RDSEndpoint,
+		infraState.S3BackupBucket,
+		infraState.Outputs,
+		infraState.CreatedAt,
+		infraState.UpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to store infrastructure state: %w", err)
+	}
+
+	return nil
+}

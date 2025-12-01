@@ -10,9 +10,12 @@ import (
 	"syscall"
 	"time"
 
+	"provisioning/internal/aws"
 	"provisioning/internal/config"
 	"provisioning/internal/db"
+	"provisioning/internal/handlers"
 	"provisioning/internal/migrate"
+	"provisioning/internal/orchestrator"
 )
 
 func main() {
@@ -67,6 +70,28 @@ func main() {
 		log.Printf("Migrations completed (version: %d, dirty: %v)", version, dirty)
 	}
 
+	// Initialize Lambda client
+	log.Println("Initializing Lambda client...")
+	lambdaClient, err := aws.NewClient(ctx, aws.Config{
+		Region: cfg.AWS.Region,
+	})
+	if err != nil {
+		log.Fatalf("Failed to create Lambda client: %v", err)
+	}
+	log.Printf("Lambda client initialized (region: %s)", cfg.AWS.Region)
+
+	// Create orchestrator
+	log.Println("Creating orchestrator...")
+	orch := orchestrator.NewOrchestrator(orchestrator.Config{
+		DB:                       database,
+		LambdaClient:             lambdaClient,
+		ProvisioningFunctionName: cfg.AWS.ProvisioningLambdaName,
+	})
+	log.Printf("Orchestrator created (Lambda function: %s)", cfg.AWS.ProvisioningLambdaName)
+
+	// Create tenant handler
+	tenantHandler := handlers.NewTenantHandler(orch)
+
 	// Setup HTTP server with health checks
 	mux := http.NewServeMux()
 
@@ -86,6 +111,9 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "ready")
 	})
+
+	// Tenant provisioning endpoint
+	mux.HandleFunc("POST /tenants", tenantHandler.CreateTenant)
 
 	// Create HTTP server
 	server := &http.Server{

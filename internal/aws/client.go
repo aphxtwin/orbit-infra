@@ -1,4 +1,4 @@
-package lambda
+package aws
 
 import (
 	"context"
@@ -75,7 +75,7 @@ func (c *Client) invoke(ctx context.Context, functionName string, payloadStruct 
 
 	// Wrap the result
 	invocationResult := &InvocationResult{
-		RequestID:       aws.ToString(result.RequestId),
+		RequestID:       "", // AWS SDK v2 doesn't expose RequestID in InvokeOutput
 		StatusCode:      result.StatusCode,
 		ExecutedVersion: aws.ToString(result.ExecutedVersion),
 		LogResult:       aws.ToString(result.LogResult),

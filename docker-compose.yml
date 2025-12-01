@@ -28,27 +28,11 @@ services:
     volumes:
       - .:/controller # Mount source code for hot reload
       - go_modules:/go/pkg/mod  # Cache Go modules
+    env_file:
+      - .env
     environment:
-      # Database configuration
+      # Override DB_HOST to use Docker service name
       DB_HOST: postgres
-      DB_PORT: 5432
-      DB_USER: postgres
-      DB_PASSWORD: postgres
-      DB_NAME: provisioning
-      DB_SSLMODE: disable
-
-      # Connection pool settings
-      DB_MAX_CONNS: 25
-      DB_MIN_CONNS: 5
-      DB_MAX_CONN_LIFETIME_MINUTES: 30
-      DB_MAX_CONN_IDLE_TIME_MINUTES: 5
-
-      # AWS (will configure KMS later)
-      AWS_REGION: us-east-1
-
-      # App settings
-      ENVIRONMENT: development
-      LOG_LEVEL: debug
     depends_on:
       postgres:
         condition: service_healthy

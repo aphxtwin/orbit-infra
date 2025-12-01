@@ -26,8 +26,9 @@ type AppConfig struct {
 
 // AWSConfig holds AWS-specific configuration
 type AWSConfig struct {
-	Region    string // AWS region (e.g., "us-east-1")
-	KMSKeyARN string // KMS key ARN for encryption
+	Region                 string // AWS region (e.g., "us-east-1")
+	KMSKeyARN              string // KMS key ARN for encryption
+	ProvisioningLambdaName string // Lambda function name for tenant provisioning
 }
 
 // LoadFromEnv loads configuration from environment variables
@@ -52,8 +53,9 @@ func LoadFromEnv() (*Config, error) {
 			Port:        getEnvAsInt("PORT", 8080),
 		},
 		AWS: AWSConfig{
-			Region:    getEnv("AWS_REGION", "us-east-1"),
-			KMSKeyARN: getEnv("KMS_KEY_ARN", ""),
+			Region:                 getEnv("AWS_REGION", "us-east-1"),
+			KMSKeyARN:              getEnv("KMS_KEY_ARN", ""),
+			ProvisioningLambdaName: getEnv("AWS_PROVISIONING_LAMBDA_NAME", "tenant-provisioning"),
 		},
 	}
 
