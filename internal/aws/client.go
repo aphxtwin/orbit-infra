@@ -181,3 +181,10 @@ func (c *Client) InvokeAsync(ctx context.Context, functionName string, payload i
 	_, err := c.invoke(ctx, functionName, payload, InvocationTypeEvent)
 	return err
 }
+
+// InvokeSync invokes a Lambda function synchronously with a generic payload
+// Useful for testing or invoking custom Lambda functions
+// Returns the full invocation result including payload and metadata
+func (c *Client) InvokeSync(ctx context.Context, functionName string, payload interface{}) (*InvocationResult, error) {
+	return c.invoke(ctx, functionName, payload, InvocationTypeRequestResponse)
+}

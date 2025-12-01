@@ -54,7 +54,7 @@ func LoadFromEnv() (*Config, error) {
 		},
 		AWS: AWSConfig{
 			Region:                 getEnv("AWS_REGION", "us-east-1"),
-			KMSKeyARN:              getEnv("KMS_KEY_ARN", ""),
+			// KMSKeyARN:              getEnv("KMS_KEY_ARN", ""),
 			ProvisioningLambdaName: getEnv("AWS_PROVISIONING_LAMBDA_NAME", "tenant-provisioning"),
 		},
 	}
@@ -65,9 +65,9 @@ func LoadFromEnv() (*Config, error) {
 	}
 
 	// KMS key ARN is optional for development but required for production
-	if cfg.App.Environment == "production" && cfg.AWS.KMSKeyARN == "" {
-		return nil, fmt.Errorf("KMS_KEY_ARN is required in production")
-	}
+	// if cfg.App.Environment == "production" && cfg.AWS.KMSKeyARN == "" {
+	// 	return nil, fmt.Errorf("KMS_KEY_ARN is required in production")
+	// }
 
 	return cfg, nil
 }

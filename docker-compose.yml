@@ -23,7 +23,7 @@ services:
   controller:
     build:
       context: .
-      dockerfile: Dockerfile.dev
+      dockerfile: Dockerfile
     container_name: provisioning-controller
     volumes:
       - .:/controller # Mount source code for hot reload
