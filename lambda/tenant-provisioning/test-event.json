@@ -1,0 +1,14 @@
+{
+  "tenant_id": "550e8400-e29b-41d4-a716-446655440000",
+  "environment": "staging",
+  "config": {
+    "region": "sa-east-1",
+    "database_instance_class": "db.t3.micro",
+    "storage_gb": 20
+  },
+  "metadata": {
+    "subdomain": "acme-test",
+    "admin_email": "admin@acme-test.com",
+    "name": "Acme Test Dealership"
+  }
+}

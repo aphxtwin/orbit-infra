@@ -10,8 +10,10 @@ import (
 
 	"provisioning/internal/api"
 	"provisioning/internal/aws"
+	"provisioning/internal/config"
 	"provisioning/internal/db"
 	"provisioning/internal/models"
+	"provisioning/internal/secrets"
 )
 
 // Orchestrator coordinates tenant provisioning between Lambda and database
@@ -19,6 +21,7 @@ type Orchestrator struct {
 	db           *db.DB
 	lambdaClient *aws.Client
 	functionName string
+	config       *config.Config // Application config for shared URLs
 }
 
 // Config holds orchestrator configuration
@@ -26,6 +29,7 @@ type Config struct {
 	DB                       *db.DB
 	LambdaClient             *aws.Client
 	ProvisioningFunctionName string
+	AppConfig                *config.Config // Application config
 }
 
 // NewOrchestrator creates a new orchestrator instance
@@ -34,6 +38,7 @@ func NewOrchestrator(cfg Config) *Orchestrator {
 		db:           cfg.DB,
 		lambdaClient: cfg.LambdaClient,
 		functionName: cfg.ProvisioningFunctionName,
+		config:       cfg.AppConfig,
 	}
 }
 
@@ -59,7 +64,54 @@ func (o *Orchestrator) CreateTenant(ctx context.Context, req api.CreateTenantReq
 	}
 
 	// Build REX URL from subdomain
-	rexURL := fmt.Sprintf("https://%s.rex.example.com", req.Subdomain)
+	rexURL := fmt.Sprintf("https://%s.bici-dev.com", req.Subdomain)
+
+	// Generate all secrets (plaintext - will be hashed before storing)
+	adminPassword, err := secrets.GeneratePassword(32)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate admin password: %w", err)
+	}
+
+	dbPassword, err := secrets.GeneratePassword(32)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate database password: %w", err)
+	}
+
+	jwtSecret, err := secrets.GenerateSecret(48)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate JWT secret: %w", err)
+	}
+
+	webhookSecret, err := secrets.GenerateSecret(32)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate webhook secret: %w", err)
+	}
+
+	// Hash all secrets for storage
+	adminPasswordHash, err := secrets.HashPassword(adminPassword)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash admin password: %w", err)
+	}
+
+	dbPasswordHash, err := secrets.HashPassword(dbPassword)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash database password: %w", err)
+	}
+
+	jwtSecretHash, err := secrets.HashPassword(jwtSecret)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash JWT secret: %w", err)
+	}
+
+	webhookSecretHash, err := secrets.HashPassword(webhookSecret)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash webhook secret: %w", err)
+	}
+
+	// Generate per-tenant values
+	dbName := secrets.GenerateDatabaseName(req.Subdomain, req.Environment)
+	dbUser := secrets.GenerateDatabaseUser(req.Subdomain)
+	odooHost := secrets.GenerateOdooHost(req.Subdomain)
 
 	// Create tenant record in database
 	tenant := &models.Tenant{
@@ -73,6 +125,17 @@ func (o *Orchestrator) CreateTenant(ctx context.Context, req api.CreateTenantReq
 		Config:     []byte("{}"), // Empty JSONB for now
 		CreatedAt:  time.Now(),
 		UpdatedAt:  time.Now(),
+
+		// Store hashed secrets (NEVER plaintext)
+		AdminPasswordHash: adminPasswordHash,
+		DBPasswordHash:    dbPasswordHash,
+		JWTSecretHash:     jwtSecretHash,
+		WebhookSecretHash: webhookSecretHash,
+
+		// Store per-tenant configuration
+		DBName:   dbName,
+		DBUser:   dbUser,
+		OdooHost: odooHost,
 	}
 
 	if err := o.createTenantInDB(ctx, tenant); err != nil {
@@ -132,12 +195,29 @@ func (o *Orchestrator) CreateTenant(ctx context.Context, req api.CreateTenantReq
 		return nil, fmt.Errorf("provisioning failed: %s", errMsg)
 	}
 
-	// Return response
+	// Return response with secrets (ONE-TIME DELIVERY)
+	// Plaintext secrets are NEVER stored, only shown once here
 	return &api.CreateTenantResponse{
 		TenantID:            tenantID.String(),
 		Status:              string(lambdaResp.Status),
 		ProvisioningStarted: true,
 		CreatedAt:           tenant.CreatedAt,
+		Secrets: &api.TenantSecrets{
+			// Per-tenant secrets (one-time delivery, never shown again)
+			AdminPassword: adminPassword,
+			DBPassword:    dbPassword,
+			JWTSecret:     jwtSecret,
+			WebhookSecret: webhookSecret,
+
+			// Per-tenant generated values
+			DBName:   dbName,
+			DBUser:   dbUser,
+			OdooHost: odooHost,
+
+			// Shared URLs (from configuration)
+			BackendURL: o.config.App.BackendURL,
+			FrontURL:   o.config.App.FrontURL,
+		},
 	}, nil
 }
 
@@ -164,8 +244,13 @@ func (o *Orchestrator) validateCreateRequest(req api.CreateTenantRequest) error 
 // createTenantInDB inserts a new tenant record
 func (o *Orchestrator) createTenantInDB(ctx context.Context, tenant *models.Tenant) error {
 	query := `
-		INSERT INTO tenants (id, name, subdomain, rex_url, admin_email, status, region, config, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO tenants (
+			id, name, subdomain, rex_url, admin_email, status, region, config,
+			created_at, updated_at,
+			admin_password_hash, db_password_hash, jwt_secret_hash, webhook_secret_hash,
+			db_name, db_user, odoo_host
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 	`
 	_, err := o.db.Pool.Exec(ctx, query,
 		tenant.ID,
@@ -178,6 +263,13 @@ func (o *Orchestrator) createTenantInDB(ctx context.Context, tenant *models.Tena
 		tenant.Config,
 		tenant.CreatedAt,
 		tenant.UpdatedAt,
+		tenant.AdminPasswordHash,
+		tenant.DBPasswordHash,
+		tenant.JWTSecretHash,
+		tenant.WebhookSecretHash,
+		tenant.DBName,
+		tenant.DBUser,
+		tenant.OdooHost,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to insert tenant: %w", err)

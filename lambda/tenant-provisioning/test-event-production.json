@@ -1,0 +1,14 @@
+{
+  "tenant_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "environment": "production",
+  "config": {
+    "region": "sa-east-1",
+    "database_instance_class": "db.t3.small",
+    "storage_gb": 100
+  },
+  "metadata": {
+    "subdomain": "dealership-xyz",
+    "admin_email": "admin@dealership-xyz.com",
+    "name": "XYZ Auto Dealership"
+  }
+}

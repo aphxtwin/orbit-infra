@@ -40,6 +40,21 @@ services:
       - "8080:8080"  # Application API port
     command: go run cmd/controller/main.go
 
+  # pgAdmin for database management
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: provisioning-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: "ivospironello@gmail.com"
+      PGADMIN_DEFAULT_PASSWORD: "12345678"
+    ports:
+      - "5051:80"  # Access pgAdmin at http://localhost:5050
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    depends_on:
+      - postgres
+
 volumes:
   postgres_data:
   go_modules:
+  pgadmin_data:
