@@ -17,10 +17,31 @@ type CreateTenantRequest struct {
 
 // CreateTenantResponse represents the response after initiating tenant provisioning
 type CreateTenantResponse struct {
-	TenantID             string    `json:"tenant_id"`
-	Status               string    `json:"status"`
-	ProvisioningStarted  bool      `json:"provisioning_started"`
-	CreatedAt            time.Time `json:"created_at"`
+	TenantID            string          `json:"tenant_id"`
+	Status              string          `json:"status"`
+	ProvisioningStarted bool            `json:"provisioning_started"`
+	CreatedAt           time.Time       `json:"created_at"`
+	Secrets             *TenantSecrets  `json:"secrets,omitempty"` // One-time delivery of secrets
+}
+
+// TenantSecrets contains generated secrets and configuration for a tenant
+// IMPORTANT: These secrets are shown ONLY ONCE in the API response
+// Plaintext values are never stored in the database
+type TenantSecrets struct {
+	// Per-tenant secrets (one-time delivery, never shown again)
+	AdminPassword string `json:"admin_password"` // Odoo admin password
+	DBPassword    string `json:"db_password"`    // Database password
+	JWTSecret     string `json:"jwt_secret"`     // JWT signing secret
+	WebhookSecret string `json:"webhook_secret"` // Webhook authentication secret
+
+	// Per-tenant generated values
+	DBName   string `json:"db_name"`   // Database name
+	DBUser   string `json:"db_user"`   // Database username
+	OdooHost string `json:"odoo_host"` // Odoo instance hostname
+
+	// Shared URLs (same for all tenants, from configuration)
+	BackendURL string `json:"backend_url"` // Shared backend API URL
+	FrontURL   string `json:"front_url"`   // Shared frontend URL
 }
 
 // ErrorResponse represents an API error response

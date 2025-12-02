@@ -86,6 +86,7 @@ func main() {
 		DB:                       database,
 		LambdaClient:             lambdaClient,
 		ProvisioningFunctionName: cfg.AWS.ProvisioningLambdaName,
+		AppConfig:                cfg,
 	})
 	log.Printf("Orchestrator created (Lambda function: %s)", cfg.AWS.ProvisioningLambdaName)
 

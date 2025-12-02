@@ -22,6 +22,10 @@ type AppConfig struct {
 	Environment string // development, staging, production
 	LogLevel    string // debug, info, warn, error
 	Port        int    // HTTP server port
+
+	// Shared URLs (same for all tenants)
+	BackendURL string // Shared backend API URL
+	FrontURL   string // Shared frontend URL
 }
 
 // AWSConfig holds AWS-specific configuration
@@ -51,6 +55,8 @@ func LoadFromEnv() (*Config, error) {
 			Environment: getEnv("ENVIRONMENT", "development"),
 			LogLevel:    getEnv("LOG_LEVEL", "info"),
 			Port:        getEnvAsInt("PORT", 8080),
+			BackendURL:  getEnv("BACKEND_URL", "https://api.bici-dev.com"),
+			FrontURL:    getEnv("FRONT_URL", "https://app.bici-dev.com"),
 		},
 		AWS: AWSConfig{
 			Region:                 getEnv("AWS_REGION", "us-east-1"),

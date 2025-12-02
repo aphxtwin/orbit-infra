@@ -26,6 +26,8 @@ type TestResponse struct {
 func main() {
 	ctx := context.Background()
 
+	log.Println("ctx:", ctx)
+
 	// Load configuration from .env file
 	log.Println("🔧 Loading configuration...")
 	cfg, err := config.LoadFromEnv()
