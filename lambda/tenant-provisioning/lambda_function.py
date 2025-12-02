@@ -46,7 +46,7 @@ def load_parameters():
         # Terraform Cloud
         'tfc_token': load_parameter('/provisioning/tfc/token'),
         'tfc_organization': 'bicidev-orbit',
-        'tfc_workspace_id': 'ws-ZHiPC8Vrb9iU7mAm',
+        # NOTE: workspace_id is NO LONGER USED - each tenant gets its own workspace
 
         # AWS Credentials
         'aws_access_key': load_parameter('/orbit/aws/access-key-id'),
@@ -79,11 +79,11 @@ def load_parameters():
 class TerraformCloudClient:
     """Client for interacting with Terraform Cloud API"""
 
-    def __init__(self, token, organization, workspace_id):
+    def __init__(self, token, organization, workspace_id=None):
         """Initialize TFC client with credentials"""
         self.token = token
         self.organization = organization
-        self.workspace_id = workspace_id
+        self.workspace_id = workspace_id  # Can be set later for per-tenant workspaces
         self.base_url = "https://app.terraform.io/api/v2"
 
     def _make_request(self, method, path, data=None):
@@ -226,8 +226,91 @@ class TerraformCloudClient:
 
         return outputs
 
+    def create_workspace(self, workspace_name, terraform_version="~> 1.6.0"):
+        """Create a new workspace for a tenant"""
+        workspace_data = {
+            'data': {
+                'type': 'workspaces',
+                'attributes': {
+                    'name': workspace_name,
+                    'terraform-version': terraform_version,
+                    'auto-apply': True,
+                    'description': f'Tenant workspace: {workspace_name}',
+                    'execution-mode': 'remote',
+                    'file-triggers-enabled': False,
+                    'queue-all-runs': False
+                }
+            }
+        }
+
+        response = self._make_request('POST', f'/organizations/{self.organization}/workspaces', workspace_data)
+        workspace_id = response['data']['id']
+        print(f"✅ Created workspace: {workspace_name} (ID: {workspace_id})")
+        return workspace_id
+
+    def get_workspace(self, workspace_name):
+        """Get workspace by name, return None if not found"""
+        try:
+            response = self._make_request('GET', f'/organizations/{self.organization}/workspaces/{workspace_name}')
+            return response['data']['id']
+        except Exception as e:
+            if '404' in str(e):
+                return None
+            raise
+
+    def delete_workspace(self, workspace_name):
+        """Delete a workspace (and all its state)"""
+        try:
+            self._make_request('DELETE', f'/organizations/{self.organization}/workspaces/{workspace_name}')
+            print(f"✅ Deleted workspace: {workspace_name}")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to delete workspace: {e}")
+            raise
+
+    def get_or_create_workspace(self, workspace_name):
+        """Get existing workspace or create new one"""
+        workspace_id = self.get_workspace(workspace_name)
+        if workspace_id:
+            print(f"📦 Using existing workspace: {workspace_name} (ID: {workspace_id})")
+            return workspace_id
+        else:
+            return self.create_workspace(workspace_name)
+
 
 def lambda_handler(event, context):
+    """
+    Main handler - routes to provisioning or deletion based on action
+
+    Provisioning event format:
+    {
+        "action": "provision",  # optional, default
+        "tenant_id": "uuid-string",
+        "environment": "staging" | "production",
+        "config": {...},
+        "metadata": {...}
+    }
+
+    Deletion event format:
+    {
+        "action": "delete",
+        "tenant_id": "uuid-string",
+        "environment": "staging" | "production",
+        "metadata": {
+            "subdomain": "tenant-name"
+        }
+    }
+    """
+    # Route to appropriate handler based on action
+    action = event.get('action', 'provision')
+
+    if action == 'delete':
+        return deletion_handler(event, context)
+    else:
+        return provision_handler(event, context)
+
+
+def provision_handler(event, context):
     """
     Handle tenant provisioning requests
 
@@ -318,20 +401,28 @@ def lambda_handler(event, context):
         print(f"   ✅ Database name: {db_name}")
 
         # ====================================================================
-        # INITIALIZE TERRAFORM CLOUD CLIENT
+        # INITIALIZE TERRAFORM CLOUD CLIENT & CREATE WORKSPACE
         # ====================================================================
         print("\n" + "=" * 70)
         print("🔧 INITIALIZING TERRAFORM CLOUD CLIENT")
         print("=" * 70)
 
+        # Generate unique workspace name per tenant
+        workspace_name = f"tenant-{subdomain}-{environment}"
+        print(f"   Target workspace: {workspace_name}")
+
+        # Initialize TFC client (workspace will be set after creation)
         tfc = TerraformCloudClient(
             token=params['tfc_token'],
-            organization=params['tfc_organization'],
-            workspace_id=params['tfc_workspace_id']
+            organization=params['tfc_organization']
         )
 
+        # Create or get the tenant-specific workspace
+        workspace_id = tfc.get_or_create_workspace(workspace_name)
+        tfc.workspace_id = workspace_id  # Set the workspace for this tenant
+
         print(f"   Organization: {params['tfc_organization']}")
-        print(f"   Workspace ID: {params['tfc_workspace_id']}")
+        print(f"   Workspace ID: {workspace_id}")
 
         # ====================================================================
         # SET TERRAFORM VARIABLES
@@ -457,6 +548,8 @@ def lambda_handler(event, context):
                 "environment": environment,
                 "region": region,
                 "terraform_run_id": run_id,
+                "terraform_workspace_name": workspace_name,
+                "terraform_workspace_id": workspace_id,
                 "duration_seconds": round(duration, 2)
             }
         }
@@ -493,6 +586,78 @@ def lambda_handler(event, context):
         import traceback
         traceback.print_exc()
         return error_response("provisioning_error", str(e))
+
+
+def deletion_handler(event, context):
+    """
+    Handle tenant deletion requests - destroys infrastructure by deleting the workspace
+
+    Expected event format:
+    {
+        "action": "delete",
+        "tenant_id": "uuid-string",
+        "environment": "staging" | "production",
+        "metadata": {
+            "subdomain": "tenant-name"
+        }
+    }
+    """
+    execution_id = str(uuid.uuid4())
+
+    print("=" * 70)
+    print("🗑️  TENANT DELETION - TERRAFORM CLOUD WORKSPACE CLEANUP")
+    print("=" * 70)
+    print(f"📋 Execution ID: {execution_id}")
+
+    try:
+        tenant_id = event.get('tenant_id')
+        environment = event.get('environment')
+        metadata = event.get('metadata', {})
+        subdomain = metadata.get('subdomain')
+
+        if not tenant_id or not environment or not subdomain:
+            return error_response("missing_parameters",
+                                "tenant_id, environment, and subdomain are required")
+
+        # Load TFC credentials
+        params = load_parameters()
+
+        # Generate workspace name (must match provisioning)
+        workspace_name = f"tenant-{subdomain}-{environment}"
+
+        print(f"🎯 Target workspace: {workspace_name}")
+
+        # Initialize TFC client
+        tfc = TerraformCloudClient(
+            token=params['tfc_token'],
+            organization=params['tfc_organization']
+        )
+
+        # Delete the workspace (this destroys all resources and removes state)
+        print(f"\n🔥 Deleting workspace and all associated infrastructure...")
+        tfc.delete_workspace(workspace_name)
+
+        print("\n" + "=" * 70)
+        print("✅ DELETION COMPLETE!")
+        print("=" * 70)
+
+        return {
+            "execution_id": execution_id,
+            "status": "completed",
+            "action": "delete",
+            "metadata": {
+                "deleted_at": datetime.utcnow().isoformat() + "Z",
+                "tenant_id": tenant_id,
+                "environment": environment,
+                "workspace_name": workspace_name
+            }
+        }
+
+    except Exception as e:
+        print(f"\n❌ ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return error_response("deletion_error", str(e))
 
 
 def generate_password(length=32):
