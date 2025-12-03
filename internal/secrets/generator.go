@@ -5,8 +5,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"math/big"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
 const (
@@ -14,8 +12,6 @@ const (
 	DefaultPasswordLength = 32
 	// DefaultSecretLength is the default length for generated secrets (in bytes, before base64 encoding)
 	DefaultSecretLength = 48
-	// BcryptCost is the cost factor for BCrypt hashing
-	BcryptCost = 12
 )
 
 // PasswordCharset defines the characters allowed in generated passwords
@@ -58,28 +54,6 @@ func GenerateSecret(byteLength int) (string, error) {
 
 	// Encode to base64 for easy storage and transmission
 	return base64.URLEncoding.EncodeToString(secretBytes), nil
-}
-
-// HashPassword hashes a password using BCrypt
-// Returns the BCrypt hash as a string
-func HashPassword(plaintext string) (string, error) {
-	if plaintext == "" {
-		return "", fmt.Errorf("cannot hash empty password")
-	}
-
-	hash, err := bcrypt.GenerateFromPassword([]byte(plaintext), BcryptCost)
-	if err != nil {
-		return "", fmt.Errorf("failed to hash password: %w", err)
-	}
-
-	return string(hash), nil
-}
-
-// VerifyPassword verifies a plaintext password against a BCrypt hash
-// Returns true if the password matches the hash
-func VerifyPassword(plaintext, hash string) bool {
-	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(plaintext))
-	return err == nil
 }
 
 // GenerateDatabaseName generates a database name from a subdomain

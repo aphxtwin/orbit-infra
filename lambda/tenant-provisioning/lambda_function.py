@@ -1,16 +1,16 @@
 """
 Tenant Provisioning Lambda Function - Terraform Cloud Integration
+VERSION WITH AUTO VCS CONFIGURATION
 
 This Lambda integrates with Terraform Cloud to provision real infrastructure for tenants.
-It loads credentials from AWS Parameter Store, triggers Terraform runs, and returns results.
+Each workspace is automatically connected to GitHub for Terraform configuration.
 """
 
 import json
 import uuid
-import secrets
-import string
 import time
 import os
+import secrets
 import urllib.request
 import urllib.error
 from datetime import datetime
@@ -39,14 +39,14 @@ def load_parameter(name, decrypt=True):
 
 
 def load_parameters():
-    """Load all required parameters from Parameter Store"""
+    """Load all required parameters from Parameter Store (including VCS config)"""
     print("📦 Loading parameters from Parameter Store...")
 
     params = {
         # Terraform Cloud
         'tfc_token': load_parameter('/provisioning/tfc/token'),
-        'tfc_organization': 'bicidev-orbit',
-        # NOTE: workspace_id is NO LONGER USED - each tenant gets its own workspace
+        'tfc_organization': load_parameter('/provisioning/tfc/organization', decrypt=False),
+        'tfc_vcs_oauth_token_id': load_parameter('/provisioning/tfc/vcs-oauth-token-id', decrypt=False),
 
         # AWS Credentials
         'aws_access_key': load_parameter('/orbit/aws/access-key-id'),
@@ -61,11 +61,23 @@ def load_parameters():
         # GitHub
         'github_repo': load_parameter('/orbit/github/repo', decrypt=False),
         'github_token': load_parameter('/orbit/github/token'),
+        'github_branch': load_parameter('/orbit/github/branch', decrypt=False),
+
+        # Terraform Repository (for VCS connection)
+        'terraform_repo': load_parameter('/orbit/terraform/repo', decrypt=False),
+        'terraform_branch': load_parameter('/orbit/terraform/branch', decrypt=False),
+        'terraform_working_directory': '',  # Empty string = use repository root
 
         # Configuration
         'domain_name': load_parameter('/orbit/config/domain-name', decrypt=False),
         'backend_url': load_parameter('/orbit/config/backend-url', decrypt=False),
         'frontend_url': load_parameter('/orbit/config/frontend-url', decrypt=False),
+
+        # Odoo Static Configuration (base database credentials)
+        'odoo_admin_password': load_parameter('/orbit/odoo/admin-password'),
+        'odoo_db_password': load_parameter('/orbit/odoo/db-password'),
+        'odoo_admin_email': load_parameter('/orbit/odoo/admin-email', decrypt=False),
+        'odoo_db_name': load_parameter('/orbit/odoo/db-name', decrypt=False),
     }
 
     print(f"✅ Loaded {len(params)} parameters from Parameter Store")
@@ -73,17 +85,18 @@ def load_parameters():
 
 
 # ============================================================================
-# TERRAFORM CLOUD API CLIENT
+# TERRAFORM CLOUD API CLIENT WITH VCS SUPPORT
 # ============================================================================
 
 class TerraformCloudClient:
-    """Client for interacting with Terraform Cloud API"""
+    """Client for interacting with Terraform Cloud API with VCS support"""
 
-    def __init__(self, token, organization, workspace_id=None):
-        """Initialize TFC client with credentials"""
+    def __init__(self, token, organization, workspace_id=None, vcs_oauth_token_id=None):
+        """Initialize TFC client with credentials and VCS config"""
         self.token = token
         self.organization = organization
-        self.workspace_id = workspace_id  # Can be set later for per-tenant workspaces
+        self.workspace_id = workspace_id
+        self.vcs_oauth_token_id = vcs_oauth_token_id
         self.base_url = "https://app.terraform.io/api/v2"
 
     def _make_request(self, method, path, data=None):
@@ -107,7 +120,6 @@ class TerraformCloudClient:
 
     def set_variable(self, key, value, sensitive=False, category="terraform"):
         """Create or update a workspace variable (workspace-scoped)"""
-        # Step 1: List existing variables to check if it exists
         vars_response = self._make_request('GET', f'/workspaces/{self.workspace_id}/vars')
         existing_var = None
 
@@ -116,28 +128,24 @@ class TerraformCloudClient:
                 existing_var = var
                 break
 
-        # Step 2: Prepare variable payload
         variable_data = {
             'data': {
                 'type': 'vars',
                 'attributes': {
                     'key': key,
                     'value': str(value),
-                    'category': category,  # "terraform" or "env"
+                    'category': category,
                     'hcl': False,
                     'sensitive': sensitive
                 }
             }
         }
 
-        # Step 3: Update existing or create new
         if existing_var:
-            # Update existing variable - PATCH /vars/:variable_id
             var_id = existing_var['id']
-            variable_data['data']['id'] = var_id  # Include ID in payload for PATCH
+            variable_data['data']['id'] = var_id
             return self._make_request('PATCH', f'/vars/{var_id}', variable_data)
         else:
-            # Create new variable - POST /workspaces/:workspace_id/vars
             variable_data['data']['relationships'] = {
                 'workspace': {
                     'data': {
@@ -148,13 +156,43 @@ class TerraformCloudClient:
             }
             return self._make_request('POST', f'/workspaces/{self.workspace_id}/vars', variable_data)
 
+    def wait_for_configuration(self, timeout=120, poll_interval=5):
+        """Wait for workspace to have a configuration version from VCS"""
+        print(f"⏳ Waiting for VCS to pull configuration (max {timeout}s)...")
+        start_time = time.time()
+
+        while True:
+            if time.time() - start_time > timeout:
+                raise Exception(f"Timeout waiting for configuration version after {timeout} seconds")
+
+            try:
+                # Get workspace details
+                response = self._make_request('GET', f'/workspaces/{self.workspace_id}')
+                workspace_data = response['data']
+
+                # Check if workspace has current configuration version
+                relationships = workspace_data.get('relationships', {})
+                current_config = relationships.get('current-configuration-version', {})
+
+                if current_config and current_config.get('data'):
+                    config_id = current_config['data']['id']
+                    print(f"✅ Configuration version ready: {config_id}")
+                    return config_id
+
+                print(f"   Waiting... (no configuration version yet)")
+                time.sleep(poll_interval)
+
+            except Exception as e:
+                print(f"   Error checking configuration: {e}")
+                time.sleep(poll_interval)
+
     def create_run(self, message="Tenant provisioning via Lambda"):
         """Create and trigger a new Terraform run with auto-apply"""
         run_data = {
             'data': {
                 'attributes': {
                     'message': message,
-                    'auto-apply': True  # Auto-apply after plan succeeds
+                    'auto-apply': True
                 },
                 'type': 'runs',
                 'relationships': {
@@ -193,31 +231,24 @@ class TerraformCloudClient:
             elif status in ['errored', 'canceled', 'discarded']:
                 raise Exception(f"Terraform run failed with status: {status}")
             elif status in ['planned_and_finished', 'planned']:
-                # This means plan succeeded but not applying (shouldn't happen with auto-apply)
                 print("⚠️  Plan completed but not applied")
                 return True
 
-            # Still running
             time.sleep(poll_interval)
 
     def get_outputs(self, run_id):
         """Get outputs from a completed run"""
-        # Step 1: Get the run details to find the state version
         run_response = self._make_request('GET', f'/runs/{run_id}')
         relationships = run_response['data'].get('relationships', {})
 
-        # Step 2: Get state version ID
         state_version_data = relationships.get('state-versions', {}).get('data')
         if not state_version_data:
             print("⚠️  No state version found")
             return {}
 
         state_version_id = state_version_data[0]['id'] if isinstance(state_version_data, list) else state_version_data['id']
-
-        # Step 3: Get outputs from state version
         outputs_response = self._make_request('GET', f'/state-versions/{state_version_id}')
 
-        # Step 4: Extract outputs
         outputs = {}
         output_data = outputs_response.get('data', {}).get('attributes', {}).get('outputs', {})
 
@@ -226,26 +257,39 @@ class TerraformCloudClient:
 
         return outputs
 
-    def create_workspace(self, workspace_name, terraform_version="~> 1.6.0"):
-        """Create a new workspace for a tenant"""
+    def create_workspace(self, workspace_name, github_repo, github_branch, working_directory, terraform_version="~> 1.6.0"):
+        """Create a new workspace with VCS connection"""
+        attributes = {
+            'name': workspace_name,
+            'terraform-version': terraform_version,
+            'auto-apply': True,
+            'description': f'Tenant workspace: {workspace_name}',
+            'file-triggers-enabled': True,
+            'queue-all-runs': False,
+            'vcs-repo': {
+                'identifier': github_repo,
+                'oauth-token-id': self.vcs_oauth_token_id,
+                'branch': github_branch
+            }
+        }
+
+        # Only set working directory if it's not empty
+        if working_directory and working_directory.strip():
+            attributes['working-directory'] = working_directory
+
         workspace_data = {
             'data': {
                 'type': 'workspaces',
-                'attributes': {
-                    'name': workspace_name,
-                    'terraform-version': terraform_version,
-                    'auto-apply': True,
-                    'description': f'Tenant workspace: {workspace_name}',
-                    'execution-mode': 'remote',
-                    'file-triggers-enabled': False,
-                    'queue-all-runs': False
-                }
+                'attributes': attributes
             }
         }
 
         response = self._make_request('POST', f'/organizations/{self.organization}/workspaces', workspace_data)
         workspace_id = response['data']['id']
-        print(f"✅ Created workspace: {workspace_name} (ID: {workspace_id})")
+        print(f"✅ Created workspace with VCS: {workspace_name} (ID: {workspace_id})")
+        print(f"   📁 Repository: {github_repo}")
+        print(f"   🌿 Branch: {github_branch}")
+        print(f"   📂 Working Directory: {working_directory}")
         return workspace_id
 
     def get_workspace(self, workspace_name):
@@ -268,40 +312,18 @@ class TerraformCloudClient:
             print(f"❌ Failed to delete workspace: {e}")
             raise
 
-    def get_or_create_workspace(self, workspace_name):
-        """Get existing workspace or create new one"""
+    def get_or_create_workspace(self, workspace_name, github_repo, github_branch, working_directory):
+        """Get existing workspace or create new one with VCS"""
         workspace_id = self.get_workspace(workspace_name)
         if workspace_id:
             print(f"📦 Using existing workspace: {workspace_name} (ID: {workspace_id})")
             return workspace_id
         else:
-            return self.create_workspace(workspace_name)
+            return self.create_workspace(workspace_name, github_repo, github_branch, working_directory)
 
 
 def lambda_handler(event, context):
-    """
-    Main handler - routes to provisioning or deletion based on action
-
-    Provisioning event format:
-    {
-        "action": "provision",  # optional, default
-        "tenant_id": "uuid-string",
-        "environment": "staging" | "production",
-        "config": {...},
-        "metadata": {...}
-    }
-
-    Deletion event format:
-    {
-        "action": "delete",
-        "tenant_id": "uuid-string",
-        "environment": "staging" | "production",
-        "metadata": {
-            "subdomain": "tenant-name"
-        }
-    }
-    """
-    # Route to appropriate handler based on action
+    """Main handler - routes to provisioning or deletion based on action"""
     action = event.get('action', 'provision')
 
     if action == 'delete':
@@ -311,36 +333,17 @@ def lambda_handler(event, context):
 
 
 def provision_handler(event, context):
-    """
-    Handle tenant provisioning requests
-
-    Expected event format:
-    {
-        "tenant_id": "uuid-string",
-        "environment": "staging" | "production",
-        "config": {
-            "region": "sa-east-1",
-            "database_instance_class": "db.t3.micro",
-            "storage_gb": 20
-        },
-        "metadata": {
-            "subdomain": "tenant-name",
-            "admin_email": "admin@example.com",
-            "name": "Tenant Name"
-        }
-    }
-    """
+    """Handle tenant provisioning requests with VCS auto-configuration"""
 
     execution_id = str(uuid.uuid4())
 
     print("=" * 70)
-    print("🚀 TENANT PROVISIONING - TERRAFORM CLOUD INTEGRATION")
+    print("🚀 TENANT PROVISIONING - WITH AUTO VCS CONFIGURATION")
     print("=" * 70)
     print(f"📋 Execution ID: {execution_id}")
     print(f"📦 Request: {json.dumps(event, indent=2)}")
 
     try:
-        # Validate required fields
         tenant_id = event.get('tenant_id')
         environment = event.get('environment')
         config = event.get('config', {})
@@ -356,101 +359,81 @@ def provision_handler(event, context):
             return error_response("invalid_environment",
                                 "environment must be 'staging' or 'production'")
 
-        # Extract metadata
         subdomain = metadata.get('subdomain', 'unknown')
-        admin_email = metadata.get('admin_email', 'admin@example.com')
         tenant_name = metadata.get('name', 'Tenant')
-
-        # Extract config with defaults
         region = config.get('region', 'sa-east-1')
-        db_instance_class = config.get('database_instance_class', 'db.t3.micro')
-        storage_gb = config.get('storage_gb', 20)
 
         print(f"\n🏢 Tenant: {tenant_name}")
         print(f"🌐 Subdomain: {subdomain}")
-        print(f"📧 Admin Email: {admin_email}")
         print(f"🌍 Environment: {environment}")
         print(f"📍 Region: {region}")
 
-        # ====================================================================
-        # LOAD PARAMETERS FROM PARAMETER STORE
-        # ====================================================================
+        # Load parameters
         print("\n" + "=" * 70)
         print("📦 LOADING CONFIGURATION FROM PARAMETER STORE")
         print("=" * 70)
 
         params = load_parameters()
 
-        # ====================================================================
-        # GENERATE SECRETS
-        # ====================================================================
-        print("\n" + "=" * 70)
-        print("🔐 GENERATING SECURE CREDENTIALS")
-        print("=" * 70)
+        admin_email = metadata.get('admin_email', params['odoo_admin_email'])
+        admin_password = params['odoo_admin_password']
+        db_password = params['odoo_db_password']
+        db_name = params['odoo_db_name']
 
-        admin_password = generate_password(32)
-        db_password = generate_password(32)
+        # Generate per-tenant secrets
         jwt_secret = generate_secret(48)
         webhook_secret = generate_secret(32)
-        db_name = f"odoo_{subdomain.replace('-', '_')}_{environment}"
 
-        print(f"   ✅ Admin password: [GENERATED - 32 chars]")
-        print(f"   ✅ DB password: [GENERATED - 32 chars]")
-        print(f"   ✅ JWT secret: [GENERATED - base64]")
-        print(f"   ✅ Webhook secret: [GENERATED - base64]")
-        print(f"   ✅ Database name: {db_name}")
+        print(f"   ✅ Using base database credentials from Parameter Store")
+        print(f"   📧 Admin Email: {admin_email}")
+        print(f"   🗄️  Database Name: {db_name}")
+        print(f"   🔐 Generated per-tenant JWT and Webhook secrets")
 
-        # ====================================================================
-        # INITIALIZE TERRAFORM CLOUD CLIENT & CREATE WORKSPACE
-        # ====================================================================
+        # Initialize Terraform Cloud Client with VCS
         print("\n" + "=" * 70)
-        print("🔧 INITIALIZING TERRAFORM CLOUD CLIENT")
+        print("🔧 INITIALIZING TERRAFORM CLOUD CLIENT WITH VCS")
         print("=" * 70)
 
-        # Generate unique workspace name per tenant
         workspace_name = f"tenant-{subdomain}-{environment}"
         print(f"   Target workspace: {workspace_name}")
 
-        # Initialize TFC client (workspace will be set after creation)
         tfc = TerraformCloudClient(
             token=params['tfc_token'],
-            organization=params['tfc_organization']
+            organization=params['tfc_organization'],
+            vcs_oauth_token_id=params['tfc_vcs_oauth_token_id']
         )
 
-        # Create or get the tenant-specific workspace
-        workspace_id = tfc.get_or_create_workspace(workspace_name)
-        tfc.workspace_id = workspace_id  # Set the workspace for this tenant
+        # Create or get workspace with VCS connection
+        workspace_id = tfc.get_or_create_workspace(
+            workspace_name=workspace_name,
+            github_repo=params['terraform_repo'],
+            github_branch=params['terraform_branch'],
+            working_directory=params['terraform_working_directory']
+        )
+        tfc.workspace_id = workspace_id
 
         print(f"   Organization: {params['tfc_organization']}")
         print(f"   Workspace ID: {workspace_id}")
 
-        # ====================================================================
-        # SET TERRAFORM VARIABLES
-        # ====================================================================
+        # Set Terraform variables
         print("\n" + "=" * 70)
         print("📝 SETTING TERRAFORM WORKSPACE VARIABLES")
         print("=" * 70)
 
         variables = {
-            # Tenant-specific (dynamic)
             'subdomain': subdomain,
             'tenant_name': tenant_name,
-            'odoo_admin_email': admin_email,
-            'odoo_db_name': db_name,
             'region': region,
-
-            # Generated secrets (sensitive)
+            'odoo_admin_email': admin_email,
             'odoo_admin_password': (admin_password, True),
             'odoo_db_password': (db_password, True),
+            'odoo_db_name': db_name,
             'odoo_jwt_secret': (jwt_secret, True),
-
-            # Static configuration
+            'odoo_webhook_secret': (webhook_secret, True),
             'domain_name': params['domain_name'],
             'backend_url': params['backend_url'],
             'frontend_url': params['frontend_url'],
-            'github_branch': 'main',
-
-            # Sensitive static config
+            'github_branch': params['github_branch'],
             'aws_access_key': (params['aws_access_key'], True),
             'aws_secret_key': (params['aws_secret_key'], True),
             'ami_id': params['ami_id'],
@@ -471,9 +454,13 @@ def provision_handler(event, context):
 
         print(f"✅ Set {len(variables)} variables")
 
-        # ====================================================================
-        # CREATE AND TRIGGER TERRAFORM RUN
-        # ====================================================================
+        # Wait for VCS to pull configuration
+        print("\n" + "=" * 70)
+        print("⏳ WAITING FOR VCS CONFIGURATION")
+        print("=" * 70)
+        tfc.wait_for_configuration(timeout=120, poll_interval=5)
+
+        # Create and trigger Terraform run
         print("\n" + "=" * 70)
         print("🚀 CREATING TERRAFORM RUN")
         print("=" * 70)
@@ -486,18 +473,13 @@ def provision_handler(event, context):
         print("\n⏳ Waiting for Terraform run to complete...")
         print("   (This may take 3-5 minutes)")
 
-        # ====================================================================
-        # WAIT FOR RUN TO COMPLETE
-        # ====================================================================
         start_time = time.time()
         tfc.wait_for_run(run_id, timeout=600, poll_interval=10)
         duration = time.time() - start_time
 
         print(f"✅ Run completed in {duration:.1f} seconds")
 
-        # ====================================================================
-        # EXTRACT OUTPUTS
-        # ====================================================================
+        # Extract outputs
         print("\n" + "=" * 70)
         print("📤 EXTRACTING TERRAFORM OUTPUTS")
         print("=" * 70)
@@ -508,9 +490,7 @@ def provision_handler(event, context):
         for key, value in outputs.items():
             print(f"   {key}: {value}")
 
-        # ====================================================================
-        # BUILD RESPONSE
-        # ====================================================================
+        # Build response
         full_domain = outputs.get('full_domain', f"{subdomain}.{params['domain_name']}")
 
         resources = {
@@ -520,25 +500,10 @@ def provision_handler(event, context):
             "odoo_host": full_domain,
         }
 
-        # Build complete response with secrets
         response = {
             "execution_id": execution_id,
             "status": "completed",
             "resources": resources,
-            "secrets": {
-                # Application credentials
-                "admin_email": admin_email,
-                "admin_password": admin_password,
-                "db_name": db_name,
-                "db_password": db_password,
-                "jwt_secret": jwt_secret,
-                "webhook_secret": webhook_secret,
-
-                # URLs
-                "odoo_host": full_domain,
-                "backend_url": params['backend_url'],
-                "front_url": params['frontend_url'],
-            },
             "metadata": {
                 "provisioned_at": datetime.utcnow().isoformat() + "Z",
                 "tenant_id": tenant_id,
@@ -550,13 +515,13 @@ def provision_handler(event, context):
                 "terraform_run_id": run_id,
                 "terraform_workspace_name": workspace_name,
                 "terraform_workspace_id": workspace_id,
-                "duration_seconds": round(duration, 2)
+                "duration_seconds": round(duration, 2),
+                "mode": "vcs_auto_configured"
             }
         }
 
-        # Print credentials summary for easy copying
         print("\n" + "=" * 70)
-        print("📋 CREDENTIALS TO COPY")
+        print("📋 CREDENTIALS (FROM PARAMETER STORE)")
         print("=" * 70)
         print(f"\n🌐 ODOO INSTANCE:")
         print(f"   URL:      https://{full_domain}")
@@ -568,8 +533,8 @@ def provision_handler(event, context):
         print(f"   Password: {db_password}")
 
         print(f"\n🔑 SECRETS:")
-        print(f"   JWT Secret:     {jwt_secret}")
-        print(f"   Webhook Secret: {webhook_secret}")
+        print(f"   JWT Secret:     [GENERATED]")
+        print(f"   Webhook Secret: [GENERATED]")
 
         print(f"\n☁️  INFRASTRUCTURE:")
         print(f"   Public IP:    {outputs.get('public_ip')}")
@@ -589,19 +554,7 @@ def provision_handler(event, context):
 
 
 def deletion_handler(event, context):
-    """
-    Handle tenant deletion requests - destroys infrastructure by deleting the workspace
-
-    Expected event format:
-    {
-        "action": "delete",
-        "tenant_id": "uuid-string",
-        "environment": "staging" | "production",
-        "metadata": {
-            "subdomain": "tenant-name"
-        }
-    }
-    """
+    """Handle tenant deletion requests"""
     execution_id = str(uuid.uuid4())
 
     print("=" * 70)
@@ -619,21 +572,16 @@ def deletion_handler(event, context):
             return error_response("missing_parameters",
                                 "tenant_id, environment, and subdomain are required")
 
-        # Load TFC credentials
         params = load_parameters()
-
-        # Generate workspace name (must match provisioning)
         workspace_name = f"tenant-{subdomain}-{environment}"
 
         print(f"🎯 Target workspace: {workspace_name}")
 
-        # Initialize TFC client
         tfc = TerraformCloudClient(
             token=params['tfc_token'],
             organization=params['tfc_organization']
         )
 
-        # Delete the workspace (this destroys all resources and removes state)
         print(f"\n🔥 Deleting workspace and all associated infrastructure...")
         tfc.delete_workspace(workspace_name)
 
@@ -658,15 +606,6 @@ def deletion_handler(event, context):
         import traceback
         traceback.print_exc()
         return error_response("deletion_error", str(e))
-
-
-def generate_password(length=32):
-    """
-    Generate a cryptographically secure random password
-    Uses uppercase, lowercase, digits, and safe special characters
-    """
-    charset = string.ascii_letters + string.digits + "!@#$%^&*-_=+"
-    return ''.join(secrets.choice(charset) for _ in range(length))
 
 
 def generate_secret(byte_length=48):

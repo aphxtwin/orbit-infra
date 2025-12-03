@@ -20,12 +20,6 @@ type Tenant struct {
 	CreatedAt  time.Time `db:"created_at"`  // When record was created
 	UpdatedAt  time.Time `db:"updated_at"`  // Last modification time
 
-	// Security: BCrypt hashes (never plaintext)
-	AdminPasswordHash  string `db:"admin_password_hash"`  // BCrypt hash of Odoo admin password
-	DBPasswordHash     string `db:"db_password_hash"`     // BCrypt hash of database password
-	JWTSecretHash      string `db:"jwt_secret_hash"`      // BCrypt hash of JWT secret
-	WebhookSecretHash  string `db:"webhook_secret_hash"`  // BCrypt hash of webhook secret
-
 	// Per-tenant database configuration
 	DBName string `db:"db_name"` // Database name (odoo_{subdomain}_{env})
 	DBUser string `db:"db_user"` // Database username (odoo_{subdomain})
